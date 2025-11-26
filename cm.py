@@ -67,7 +67,7 @@ def format_indian_currency(n):
     if n >= 1e5: return f"{sign}₹ {n/1e5:,.2f} L"
     return f"{sign}₹ {n:,.0f}"
 
-@st.cache_data
+@st.cache_data(ttl=300)
 def load_data_from_ftp(_ftp_config): # Added underscore to ignore this arg for hashing
     """
     Connects to an FTP server using credentials from st.secrets,
@@ -342,4 +342,5 @@ if df is not None:
                     with st.expander("👀 View SKUs Below 10%"):
                         st.dataframe(below_target[['DSM', 'Item Name', 'CM %']].style.format({'CM %': '{:.2f}%'}), use_container_width=True)
 else:
+
     st.info("Please fix the data loading issue to see the dashboard.")

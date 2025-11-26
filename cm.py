@@ -123,7 +123,7 @@ def display_kpi_cards(df):
     else:
         total_net_value = df['Net Value'].sum()
         total_cm = df['CM'].sum()
-        total_cogs = df['COGS'].sum()
+        total_cogs = df['COD'].sum()
         cm_percentage = (total_cm / total_net_value * 100) if total_net_value != 0 else 0
 
     kpi1, kpi2, kpi3, kpi4 = st.columns(4)
@@ -344,3 +344,4 @@ if df is not None:
 else:
 
     st.info("Please fix the data loading issue to see the dashboard.")
+

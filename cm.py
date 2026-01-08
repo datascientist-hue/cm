@@ -3,6 +3,8 @@ import pandas as pd
 from streamlit_echarts import st_echarts
 import numpy as np
 import calendar
+from ftplib import FTP
+import io
 
 # ---------------------------------
 # Page Configuration
@@ -57,12 +59,48 @@ def format_indian_currency(n):
     return f"{sign}₹ {n:,.0f}"
 
 @st.cache_data
-def load_data(main_path, cat_path):
+def load_data_from_ftp(_ftp_details):
+    """
+    Connects to an FTP server and downloads two specified files into pandas DataFrames.
+    The leading underscore in '_ftp_details' tells Streamlit not to hash this argument.
+    """
     try:
-        # 1. Load Main Data
-        df = pd.read_csv(main_path, encoding='latin1')
+        ftp = FTP(_ftp_details["host"])
+        ftp.login(user=_ftp_details["user"], passwd=_ftp_details["password"])
+
+        # Download main data file
+        main_flo = io.BytesIO()
+        ftp.retrbinary('RETR ' + _ftp_details["main_path"], main_flo.write)
+        main_flo.seek(0)
+        # FIXED: Added engine='python' and on_bad_lines='warn' to handle malformed CSV rows
+        df = pd.read_parquet(main_flo)
+
+        # Download category mapping file
+        cat_flo = io.BytesIO()
+        ftp.retrbinary('RETR ' + _ftp_details["cat_path"], cat_flo.write)
+        cat_flo.seek(0)
+        # FIXED: Added engine='python' and on_bad_lines='warn' for robustness
+        cat_df = pd.read_parquet(cat_flo)
+
+        ftp.quit()
+        return df, cat_df
+
+    except Exception as e:
+        st.error(f"FTP Error: {e}")
+        return None, None
+
+
+@st.cache_data
+def process_data(df, cat_df):
+    """
+    Processes the raw dataframes into the final dataframe for the dashboard.
+    """
+    if df is None:
+        return None
+    try:
+        # 1. Process Main Data
         df['Inv Date'] = pd.to_datetime(df['Inv Date'], errors='coerce')
-        
+
         # Numeric Clean up
         qty_candidates = ['Qty in Ltrs/Kgs', 'Qty', 'Billed Qty', 'Quantity', 'Eq Qty']
         qty_col = next((col for col in qty_candidates if col in df.columns), None)
@@ -70,7 +108,7 @@ def load_data(main_path, cat_path):
         if qty_col:
             df['Qty'] = pd.to_numeric(df[qty_col], errors='coerce').fillna(0)
         else:
-            df['Qty'] = 0 
+            df['Qty'] = 0
 
         numeric_cols = ['Net Value', 'Net Rate', 'COGS']
         for col in numeric_cols:
@@ -84,15 +122,11 @@ def load_data(main_path, cat_path):
         df['Month_Year'] = df['Inv Date'].dt.strftime('%b-%y')
         df['Month_Sort'] = df['Inv Date'].dt.to_period('M')
 
-        # 2. Load Mapping Data (mastermap.csv)
-        try:
-            cat_df = pd.read_csv(cat_path, encoding='latin1')
-            if 'Prod Ctg' in df.columns and 'Prod Ctg' in cat_df.columns and 'Prod_cat_master' in cat_df.columns:
-                df = df.merge(cat_df[['Prod Ctg', 'Prod_cat_master']], on='Prod Ctg', how='left')
-                df['Prod_cat_master'] = df['Prod_cat_master'].fillna('Unmapped')
-            else:
-                df['Prod_cat_master'] = df.get('Prod Ctg', 'Unmapped')
-        except FileNotFoundError:
+        # 2. Process and Merge Mapping Data
+        if cat_df is not None and 'Prod Ctg' in df.columns and 'Prod Ctg' in cat_df.columns and 'Prod_cat_master' in cat_df.columns:
+            df = df.merge(cat_df[['Prod Ctg', 'Prod_cat_master']], on='Prod Ctg', how='left')
+            df['Prod_cat_master'] = df['Prod_cat_master'].fillna('Unmapped')
+        else:
             df['Prod_cat_master'] = df.get('Prod Ctg', 'Unmapped')
 
         # 3. Logic Implementation
@@ -117,11 +151,9 @@ def load_data(main_path, cat_path):
         df['CM'] = df['Net Value'] - df['COD']
         
         return df
-    except FileNotFoundError:
-        st.error(f"Error: File not found at {main_path}. Please check the path.")
-        return None
+
     except Exception as e:
-        st.error(f"An error occurred: {e}")
+        st.error(f"An error occurred during data processing: {e}")
         return None
 
 def get_static_fixed_expenses():
@@ -247,10 +279,17 @@ def create_multi_bar_chart(df, x_col, col1, col2, title, theme):
 # ---------------------------------
 # Main App Logic
 # ---------------------------------
-FILE_PATH = r"E:\scm\cm.csv"
-CAT_FILE_PATH = r"E:\scm\mastermap.csv"
+try:
+    ftp_credentials = st.secrets["ftp"]
+    raw_df, raw_cat_df = load_data_from_ftp(ftp_credentials)
+    df = process_data(raw_df, raw_cat_df)
+except FileNotFoundError:
+    st.error("Secrets file not found. Please create a .streamlit/secrets.toml file with your FTP credentials.")
+    st.stop()
+except KeyError:
+    st.error("FTP credentials not found in secrets.toml. Please ensure 'host', 'user', 'password', 'main_path', and 'cat_path' are set under the [ftp] section.")
+    st.stop()
 
-df = load_data(FILE_PATH, CAT_FILE_PATH)
 
 if df is not None:
     # --- Sidebar Filters ---

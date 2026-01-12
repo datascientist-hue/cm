@@ -3,8 +3,6 @@ import pandas as pd
 from streamlit_echarts import st_echarts
 import numpy as np
 import calendar
-from ftplib import FTP
-import io
 
 # ---------------------------------
 # Page Configuration
@@ -59,48 +57,12 @@ def format_indian_currency(n):
     return f"{sign}₹ {n:,.0f}"
 
 @st.cache_data
-def load_data_from_ftp(_ftp_details):
-    """
-    Connects to an FTP server and downloads two specified files into pandas DataFrames.
-    The leading underscore in '_ftp_details' tells Streamlit not to hash this argument.
-    """
+def load_data(main_path, cat_path):
     try:
-        ftp = FTP(_ftp_details["host"])
-        ftp.login(user=_ftp_details["user"], passwd=_ftp_details["password"])
-
-        # Download main data file
-        main_flo = io.BytesIO()
-        ftp.retrbinary('RETR ' + _ftp_details["main_path"], main_flo.write)
-        main_flo.seek(0)
-        # FIXED: Added engine='python' and on_bad_lines='warn' to handle malformed CSV rows
-        df = pd.read_parquet(main_flo)
-
-        # Download category mapping file
-        cat_flo = io.BytesIO()
-        ftp.retrbinary('RETR ' + _ftp_details["cat_path"], cat_flo.write)
-        cat_flo.seek(0)
-        # FIXED: Added engine='python' and on_bad_lines='warn' for robustness
-        cat_df = pd.read_parquet(cat_flo)
-
-        ftp.quit()
-        return df, cat_df
-
-    except Exception as e:
-        st.error(f"FTP Error: {e}")
-        return None, None
-
-
-@st.cache_data
-def process_data(df, cat_df):
-    """
-    Processes the raw dataframes into the final dataframe for the dashboard.
-    """
-    if df is None:
-        return None
-    try:
-        # 1. Process Main Data
+        # 1. Load Main Data
+        df = pd.read_csv(main_path, encoding='latin1')
         df['Inv Date'] = pd.to_datetime(df['Inv Date'], errors='coerce')
-
+        
         # Numeric Clean up
         qty_candidates = ['Qty in Ltrs/Kgs', 'Qty', 'Billed Qty', 'Quantity', 'Eq Qty']
         qty_col = next((col for col in qty_candidates if col in df.columns), None)
@@ -108,7 +70,7 @@ def process_data(df, cat_df):
         if qty_col:
             df['Qty'] = pd.to_numeric(df[qty_col], errors='coerce').fillna(0)
         else:
-            df['Qty'] = 0
+            df['Qty'] = 0 
 
         numeric_cols = ['Net Value', 'Net Rate', 'COGS']
         for col in numeric_cols:
@@ -122,11 +84,15 @@ def process_data(df, cat_df):
         df['Month_Year'] = df['Inv Date'].dt.strftime('%b-%y')
         df['Month_Sort'] = df['Inv Date'].dt.to_period('M')
 
-        # 2. Process and Merge Mapping Data
-        if cat_df is not None and 'Prod Ctg' in df.columns and 'Prod Ctg' in cat_df.columns and 'Prod_cat_master' in cat_df.columns:
-            df = df.merge(cat_df[['Prod Ctg', 'Prod_cat_master']], on='Prod Ctg', how='left')
-            df['Prod_cat_master'] = df['Prod_cat_master'].fillna('Unmapped')
-        else:
+        # 2. Load Mapping Data (mastermap.csv)
+        try:
+            cat_df = pd.read_csv(cat_path, encoding='latin1')
+            if 'Prod Ctg' in df.columns and 'Prod Ctg' in cat_df.columns and 'Prod_cat_master' in cat_df.columns:
+                df = df.merge(cat_df[['Prod Ctg', 'Prod_cat_master']], on='Prod Ctg', how='left')
+                df['Prod_cat_master'] = df['Prod_cat_master'].fillna('Unmapped')
+            else:
+                df['Prod_cat_master'] = df.get('Prod Ctg', 'Unmapped')
+        except FileNotFoundError:
             df['Prod_cat_master'] = df.get('Prod Ctg', 'Unmapped')
 
         # 3. Logic Implementation
@@ -142,7 +108,7 @@ def process_data(df, cat_df):
              if 'Region' in df.columns: df['State'] = df['Region']
              else: df['State'] = 'Unknown'
 
-        conditions = [df['DSM'].str.strip() == 'DSM-AP']
+        conditions = [df['DSM'].str.strip().isin(['DSM-AP', 'DSM-WEST'])]
         choices = [0.10] 
         df['VC_Percent'] = np.select(conditions, choices, default=0.05)
         
@@ -151,13 +117,30 @@ def process_data(df, cat_df):
         df['CM'] = df['Net Value'] - df['COD']
         
         return df
-
+    except FileNotFoundError:
+        st.error(f"Error: File not found at {main_path}. Please check the path.")
+        return None
     except Exception as e:
-        st.error(f"An error occurred during data processing: {e}")
+        st.error(f"An error occurred: {e}")
         return None
 
-def get_static_fixed_expenses():
-    data = {
+# --- MODIFIED FUNCTION FOR DYNAMIC FIXED EXPENSES ---
+def get_static_fixed_expenses(selected_dsm):
+    # Case 1: DSM-WEST (Data from your Image)
+    # Total: ~6.42 Lakhs
+    west_data = {
+        "GL Code & Description": [
+            "E201010001 - Salary", "E201010002 - Wes", "E201010003 - Employer share of PF",
+            "E201010004 - Employer share of ESI", "E205010001 - Telephone Charges",
+            "E301020001 - Rent - CFA", "E301020002 - Commission - CFA",
+            "E301020003 - Reimbursement Exp -CFA"
+        ],
+        "Amount": [439724.0, 94585.0, 22644.0, 680.0, 2244.0, 28000.0, 17417.0, 37000.0]
+    }
+
+    # Case 2: DSM-AP (Existing Data)
+    # Total: ~9.6 Lakhs
+    ap_data = {
         "GL Code & Description": [
             "E201010001 - Salary", "E201010002 - Wes", "E201010003 - Employer share of PF",
             "E201010004 - Employer share of ESI", "E205010001 - Telephone Charges",
@@ -166,7 +149,13 @@ def get_static_fixed_expenses():
         ],
         "Amount": [699409.0, 127697.1, 45878.0, 0.0, 2000.0, 40000.0, 23000.0, 26000.0]
     }
-    return pd.DataFrame(data)
+    
+    # Logic: Switch based on filter
+    if selected_dsm == 'DSM-WEST':
+        return pd.DataFrame(west_data)
+    else:
+        # Default to AP data (or general) if AP or All is selected
+        return pd.DataFrame(ap_data)
 
 # ---------------------------------
 # UI Components
@@ -279,17 +268,10 @@ def create_multi_bar_chart(df, x_col, col1, col2, title, theme):
 # ---------------------------------
 # Main App Logic
 # ---------------------------------
-try:
-    ftp_credentials = st.secrets["ftp"]
-    raw_df, raw_cat_df = load_data_from_ftp(ftp_credentials)
-    df = process_data(raw_df, raw_cat_df)
-except FileNotFoundError:
-    st.error("Secrets file not found. Please create a .streamlit/secrets.toml file with your FTP credentials.")
-    st.stop()
-except KeyError:
-    st.error("FTP credentials not found in secrets.toml. Please ensure 'host', 'user', 'password', 'main_path', and 'cat_path' are set under the [ftp] section.")
-    st.stop()
+FILE_PATH = r"E:\scm\cm.csv"
+CAT_FILE_PATH = r"E:\scm\mastermap.csv"
 
+df = load_data(FILE_PATH, CAT_FILE_PATH)
 
 if df is not None:
     # --- Sidebar Filters ---
@@ -374,8 +356,11 @@ if df is not None:
     st.sidebar.header("⚙️ Cost Settings")
     use_18_percent = st.sidebar.checkbox("✅ Use 18% of Sales as Fixed Cost", value=False)
     
-    fixed_expenses_df = get_static_fixed_expenses()
+    # --- DYNAMIC FIXED EXPENSES CALL ---
+    # Pass selected DSM to get the correct expenses
+    fixed_expenses_df = get_static_fixed_expenses(sel_dsm)
     static_total_fixed = fixed_expenses_df['Amount'].sum()
+    
     current_sales = df_filtered['Net Value'].sum() if not df_filtered.empty else 0
 
     if use_18_percent:
@@ -445,20 +430,16 @@ if df is not None:
                         
                 st.markdown('</div>', unsafe_allow_html=True)
 
-    # --- TAB 2: JC View (MODIFIED AS REQUESTED) ---
+    # --- TAB 2: JC View ---
     with tab2:
         render_kpis()
         st.markdown("<hr>", unsafe_allow_html=True)
         
-        # NOTE: Using original 'df' with date filters here to show ALL periods back-to-back 
-        # even if "Current JC" is selected in sidebar (which normally limits to 1 period).
         df_jc_view = df[(df['Inv Date'] >= start_date) & (df['Inv Date'] <= end_date)]
         
-        # Re-apply sidebar filters to this view to keep consistency
         if sel_state != 'All': df_jc_view = df_jc_view[df_jc_view['State'] == sel_state]
         if sel_months and len(sel_months) < len(sorted_months):
              df_jc_view = df_jc_view[df_jc_view['Month_Year'].isin(sel_months)]
-        # We purposely skip 'sel_period' filter here if Current JC is selected to show the history
         if sel_week != 'All': df_jc_view = df_jc_view[df_jc_view['JCWeek'] == sel_week]
         if sel_dsm != 'All': df_jc_view = df_jc_view[df_jc_view['DSM'] == sel_dsm]
         if 'Prod_cat_master' in df_jc_view.columns and sel_prod != 'All':
@@ -469,17 +450,14 @@ if df is not None:
         if df_jc_view.empty:
             st.warning("No data available for the selected filters.")
         else:
-            # Get Unique Periods and Sort Descending (JC 11, JC 10, ...)
             if 'JCPeriod' in df_jc_view.columns:
                 unique_periods = sorted(df_jc_view['JCPeriod'].dropna().unique().tolist(), reverse=True)
                 
                 for period in unique_periods:
                     st.markdown(f"### 🗓️ JC Period: {period}")
                     
-                    # Filter data for this period
                     period_data = df_jc_view[df_jc_view['JCPeriod'] == period]
                     
-                    # Group by Week
                     jc_week_wise = period_data.groupby('JCWeek').agg(
                         Net_Value=('Net Value', 'sum'), 
                         COD=('COD', 'sum'), 
@@ -488,7 +466,6 @@ if df is not None:
                     
                     jc_week_wise['CM %'] = np.where(jc_week_wise['Net_Value'] != 0, (jc_week_wise['CM'] / jc_week_wise['Net_Value']) * 100, 0)
                     
-                    # Display Table
                     st.dataframe(jc_week_wise.style.format({'Net_Value': '{:,.2f}', 'COD': '{:,.2f}', 'CM': '{:,.2f}', 'CM %': '{:.2f}%'}), use_container_width=True)
                     st.markdown("---")
             else:
@@ -572,15 +549,18 @@ if df is not None:
             st.subheader("🧮 Logic")
             st.markdown(r"""
             1. **Map:** `Prod Ctg` $\rightarrow$ `Prod_cat_master`
-            2. **VC:** 10% (AP), 5% (Others)
+            2. **VC:** 10% (AP & WEST), 5% (Others)
             3. **Profit:** CM - Fixed Cost
             """)
         with c2:
-            st.subheader("📋 Fixed Cost")
+            st.subheader("📋 Fixed Cost Breakdown")
             if use_18_percent:
                 st.warning(f"Using 18%: {format_indian_currency(final_fixed_cost)}")
             else:
-                st.success(f"Using Actuals: {format_indian_currency(final_fixed_cost)}")
+                if sel_dsm == 'DSM-WEST':
+                    st.info(f"Using **WEST** Actuals: {format_indian_currency(final_fixed_cost)}")
+                else:
+                    st.success(f"Using **Default/AP** Actuals: {format_indian_currency(final_fixed_cost)}")
                 st.dataframe(fixed_expenses_df, hide_index=True, use_container_width=True)
 
     # --- TAB 5: Trend Analysis ---
@@ -593,7 +573,7 @@ if df is not None:
             base_agg = df_filtered.groupby('Prod Ctg').agg(
                 Sum_Qty=('Qty', 'sum'),
                 Contribution=('CM', 'sum')
-            )
+            ).reset_index()
             
             pivot_nv = df_filtered.pivot_table(
                 index='Prod Ctg', columns='Month_Sort', values='Net Value', 
@@ -610,6 +590,29 @@ if df is not None:
             
             pivot_pct_df = pd.DataFrame(pivot_pct, index=pivot_cm.index, columns=pivot_cm.columns)
             pivot_pct_df.fillna(0, inplace=True)
+            
+            # --- KPI Cards specific to THIS TAB ---
+            total_contribution = base_agg['Contribution'].sum()
+            total_qty = base_agg['Sum_Qty'].sum()
+            total_net_value = df_filtered['Net Value'].sum() # Need this for overall %
+            overall_cm_pct = (total_contribution / total_net_value) * 100 if total_net_value > 0 else 0
+            num_products = len(base_agg)
+            num_months = len(pivot_pct_df.columns)
+
+            kpi1, kpi2, kpi3, kpi4, kpi5 = st.columns(5)
+            with kpi1:
+                st.markdown(f'<div class="kpi-card"><div class="kpi-label">Total Contribution</div><div class="kpi-value">{format_indian_currency(total_contribution)}</div></div>', unsafe_allow_html=True)
+            with kpi2:
+                st.markdown(f'<div class="kpi-card"><div class="kpi-label">Total Quantity (Kgs/Ltrs)</div><div class="kpi-value">{total_qty:,.0f}</div></div>', unsafe_allow_html=True)
+            with kpi3:
+                st.markdown(f'<div class="kpi-card"><div class="kpi-label">Overall CM %</div><div class="kpi-value">{overall_cm_pct:.2f}%</div></div>', unsafe_allow_html=True)
+            with kpi4:
+                st.markdown(f'<div class="kpi-card"><div class="kpi-label"># Product Categories</div><div class="kpi-value">{num_products}</div></div>', unsafe_allow_html=True)
+            with kpi5:
+                 st.markdown(f'<div class="kpi-card"><div class="kpi-label"># Months in Trend</div><div class="kpi-value">{num_months}</div></div>', unsafe_allow_html=True)
+            
+            st.markdown("<hr>", unsafe_allow_html=True)
+            # --- End of KPI Cards ---
             
             pivot_pct_df.columns = [c.strftime('%b-%y') for c in pivot_pct_df.columns]
             

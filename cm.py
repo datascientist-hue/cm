@@ -2,7 +2,8 @@ import streamlit as st
 import pandas as pd
 from streamlit_echarts import st_echarts
 import numpy as np
-import calendar
+import ftplib
+import io
 
 # ---------------------------------
 # Page Configuration
@@ -56,11 +57,45 @@ def format_indian_currency(n):
     if n >= 1e5: return f"{sign}₹ {n/1e5:,.2f} L"
     return f"{sign}₹ {n:,.0f}"
 
-@st.cache_data
-def load_data(main_path, cat_path):
+@st.cache_data(ttl=3600)
+def load_data_from_ftp():
+    # FTP Paths
+    cm_remote_path = "/public_html/VVD_Hic/data_storage/Contribution_Margin.pqt"
+    map_remote_path = "/public_html/VVD_Hic/data_storage/mastermap.parquet"
+    
     try:
-        # 1. Load Main Data
-        df = pd.read_csv(main_path, encoding='latin1')
+        # 1. Retrieve Credentials from Secrets
+        if "ftp" not in st.secrets:
+            st.error("FTP credentials not found in .streamlit/secrets.toml")
+            return None
+            
+        ftp_host = st.secrets["ftp"]["host"]
+        ftp_user = st.secrets["ftp"]["user"]
+        ftp_pass = st.secrets["ftp"]["password"]
+
+        # 2. Connect to FTP
+        ftp = ftplib.FTP(ftp_host)
+        ftp.login(ftp_user, ftp_pass)
+        
+        # 3. Download Main Data (Parquet) to Memory
+        cm_buffer = io.BytesIO()
+        ftp.retrbinary(f"RETR {cm_remote_path}", cm_buffer.write)
+        cm_buffer.seek(0)
+        df = pd.read_parquet(cm_buffer)
+        
+        # 4. Download Map Data (Parquet) to Memory
+        map_buffer = io.BytesIO()
+        ftp.retrbinary(f"RETR {map_remote_path}", map_buffer.write)
+        map_buffer.seek(0)
+        cat_df = pd.read_parquet(map_buffer)
+        
+        ftp.quit()
+
+        # ---------------------------
+        # Data Processing Logic
+        # ---------------------------
+        
+        # Date Conversion
         df['Inv Date'] = pd.to_datetime(df['Inv Date'], errors='coerce')
         
         # Numeric Clean up
@@ -84,18 +119,14 @@ def load_data(main_path, cat_path):
         df['Month_Year'] = df['Inv Date'].dt.strftime('%b-%y')
         df['Month_Sort'] = df['Inv Date'].dt.to_period('M')
 
-        # 2. Load Mapping Data (mastermap.csv)
-        try:
-            cat_df = pd.read_csv(cat_path, encoding='latin1')
-            if 'Prod Ctg' in df.columns and 'Prod Ctg' in cat_df.columns and 'Prod_cat_master' in cat_df.columns:
-                df = df.merge(cat_df[['Prod Ctg', 'Prod_cat_master']], on='Prod Ctg', how='left')
-                df['Prod_cat_master'] = df['Prod_cat_master'].fillna('Unmapped')
-            else:
-                df['Prod_cat_master'] = df.get('Prod Ctg', 'Unmapped')
-        except FileNotFoundError:
+        # Merge Mapping Data
+        if 'Prod Ctg' in df.columns and 'Prod Ctg' in cat_df.columns and 'Prod_cat_master' in cat_df.columns:
+            df = df.merge(cat_df[['Prod Ctg', 'Prod_cat_master']], on='Prod Ctg', how='left')
+            df['Prod_cat_master'] = df['Prod_cat_master'].fillna('Unmapped')
+        else:
             df['Prod_cat_master'] = df.get('Prod Ctg', 'Unmapped')
 
-        # 3. Logic Implementation
+        # Logic Implementation
         df['DSM'] = df['DSM'].fillna('').astype(str)
         
         # Ensure Item Name exists for SKU analysis
@@ -108,6 +139,7 @@ def load_data(main_path, cat_path):
              if 'Region' in df.columns: df['State'] = df['Region']
              else: df['State'] = 'Unknown'
 
+        # Variable Cost Logic
         conditions = [df['DSM'].str.strip().isin(['DSM-AP', 'DSM-WEST'])]
         choices = [0.10] 
         df['VC_Percent'] = np.select(conditions, choices, default=0.05)
@@ -117,17 +149,17 @@ def load_data(main_path, cat_path):
         df['CM'] = df['Net Value'] - df['COD']
         
         return df
-    except FileNotFoundError:
-        st.error(f"Error: File not found at {main_path}. Please check the path.")
+
+    except ftplib.all_errors as e:
+        st.error(f"FTP Connection Error: {e}")
         return None
     except Exception as e:
-        st.error(f"An error occurred: {e}")
+        st.error(f"Data Processing Error: {e}")
         return None
 
 # --- MODIFIED FUNCTION FOR DYNAMIC FIXED EXPENSES ---
 def get_static_fixed_expenses(selected_dsm):
-    # Case 1: DSM-WEST (Data from your Image)
-    # Total: ~6.42 Lakhs
+    # Case 1: DSM-WEST
     west_data = {
         "GL Code & Description": [
             "E201010001 - Salary", "E201010002 - Wes", "E201010003 - Employer share of PF",
@@ -139,7 +171,6 @@ def get_static_fixed_expenses(selected_dsm):
     }
 
     # Case 2: DSM-AP (Existing Data)
-    # Total: ~9.6 Lakhs
     ap_data = {
         "GL Code & Description": [
             "E201010001 - Salary", "E201010002 - Wes", "E201010003 - Employer share of PF",
@@ -268,10 +299,9 @@ def create_multi_bar_chart(df, x_col, col1, col2, title, theme):
 # ---------------------------------
 # Main App Logic
 # ---------------------------------
-FILE_PATH = r"E:\scm\cm.csv"
-CAT_FILE_PATH = r"E:\scm\mastermap.csv"
 
-df = load_data(FILE_PATH, CAT_FILE_PATH)
+# Load data via FTP
+df = load_data_from_ftp()
 
 if df is not None:
     # --- Sidebar Filters ---
@@ -701,4 +731,4 @@ if df is not None:
             )
 
 else:
-    st.info("Please fix the data loading issue to see the dashboard.")
+    st.info("Please verify your FTP credentials and file paths in .streamlit/secrets.toml")
